@@ -1,11 +1,14 @@
 package httpserver
 
 import (
+	"bytes"
+	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewReplacer(t *testing.T) {
@@ -118,7 +121,7 @@ func TestSet(t *testing.T) {
 
 	request, err := http.NewRequest("POST", "http://localhost", reader)
 	if err != nil {
-		t.Fatalf("Request Formation Failed \n")
+		t.Fatalf("Request Formation Failed: %s\n", err.Error())
 	}
 	repl := NewReplacer(request, recordRequest, "")
 
@@ -138,5 +141,50 @@ func TestSet(t *testing.T) {
 	}
 	if repl.Replace("The value of variable is {variable}") != "The value of variable is value" {
 		t.Error("Expected variable replacement failed")
+	}
+}
+
+func TestRound(t *testing.T) {
+	var tests = map[time.Duration]time.Duration{
+		// 599.935µs -> 560µs
+		559935 * time.Nanosecond: 560 * time.Microsecond,
+		// 1.55ms    -> 2ms
+		1550 * time.Microsecond: 2 * time.Millisecond,
+		// 1.5555s   -> 1.556s
+		1555500 * time.Microsecond: 1556 * time.Millisecond,
+		// 1m2.0035s -> 1m2.004s
+		62003500 * time.Microsecond: 62004 * time.Millisecond,
+	}
+
+	for dur, expected := range tests {
+		rounded := roundDuration(dur)
+		if rounded != expected {
+			t.Errorf("Expected %v, Got %v", expected, rounded)
+		}
+	}
+}
+
+func TestReadRequestBody(t *testing.T) {
+	payload := []byte(`{ "foo": "bar" }`)
+	var readSize int64 = 5
+	r, err := http.NewRequest("POST", "/", bytes.NewReader(payload))
+	if err != nil {
+		t.Error(err)
+	}
+	defer r.Body.Close()
+
+	logBody, err := readRequestBody(r, readSize)
+	if err != nil {
+		t.Error("readRequestBody failed", err)
+	} else if !bytes.EqualFold(payload[0:readSize], logBody) {
+		t.Error("Expected log comparison failed")
+	}
+
+	// Ensure the Request body is the same as the original.
+	reqBody, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		t.Error("Unable to read request body", err)
+	} else if !bytes.EqualFold(payload, reqBody) {
+		t.Error("Expected request body comparison failed")
 	}
 }

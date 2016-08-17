@@ -83,7 +83,7 @@ func socketDial(hostName string) func(network, addr string) (conn net.Conn, err 
 // the target request will be for /base/dir.
 // Without logic: target's path is "/", incoming is "/api/messages",
 // without is "/api", then the target request will be for /messages.
-func NewSingleHostReverseProxy(target *url.URL, without string) *ReverseProxy {
+func NewSingleHostReverseProxy(target *url.URL, without string, keepalive int) *ReverseProxy {
 	targetQuery := target.RawQuery
 	director := func(req *http.Request) {
 		if target.Scheme == "unix" {
@@ -122,53 +122,58 @@ func NewSingleHostReverseProxy(target *url.URL, without string) *ReverseProxy {
 		rp.Transport = &http.Transport{
 			Dial: socketDial(target.String()),
 		}
+	} else if keepalive != http.DefaultMaxIdleConnsPerHost {
+		// if keepalive is equal to the default,
+		// just use default transport, to avoid creating
+		// a brand new transport
+		rp.Transport = &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			Dial: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).Dial,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
+		if keepalive == 0 {
+			rp.Transport.(*http.Transport).DisableKeepAlives = true
+		} else {
+			rp.Transport.(*http.Transport).MaxIdleConnsPerHost = keepalive
+		}
 	}
 	return rp
 }
 
-func copyHeader(dst, src http.Header) {
-	for k, vv := range src {
-		for _, v := range vv {
-			dst.Add(k, v)
+// UseInsecureTransport is used to facilitate HTTPS proxying
+// when it is OK for upstream to be using a bad certificate,
+// since this transport skips verification.
+func (rp *ReverseProxy) UseInsecureTransport() {
+	if rp.Transport == nil {
+		rp.Transport = &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			Dial: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).Dial,
+			TLSHandshakeTimeout: 10 * time.Second,
+			TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 		}
+	} else if transport, ok := rp.Transport.(*http.Transport); ok {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 }
 
-// Hop-by-hop headers. These are removed when sent to the backend.
-// http://www.w3.org/Protocols/rfc2616/rfc2616-sec13.html
-var hopHeaders = []string{
-	"Connection",
-	"Keep-Alive",
-	"Proxy-Authenticate",
-	"Proxy-Authorization",
-	"Te", // canonicalized version of "TE"
-	"Trailers",
-	"Transfer-Encoding",
-	"Upgrade",
-}
-
-// InsecureTransport is used to facilitate HTTPS proxying
-// when it is OK for upstream to be using a bad certificate,
-// since this transport skips verification.
-var InsecureTransport http.RoundTripper = &http.Transport{
-	Proxy: http.ProxyFromEnvironment,
-	Dial: (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}).Dial,
-	TLSHandshakeTimeout: 10 * time.Second,
-	TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
-}
-
-type respUpdateFn func(resp *http.Response)
-
-func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, outreq *http.Request, respUpdateFn respUpdateFn) error {
-	transport := p.Transport
-	if transport == nil {
+// ServeHTTP serves the proxied request to the upstream by performing a roundtrip.
+// It is designed to handle websocket connection upgrades as well.
+func (rp *ReverseProxy) ServeHTTP(rw http.ResponseWriter, outreq *http.Request, respUpdateFn respUpdateFn) error {
+	transport := rp.Transport
+	if requestIsWebsocket(outreq) {
+		transport = newConnHijackerTransport(transport)
+	} else if transport == nil {
 		transport = http.DefaultTransport
 	}
 
-	p.Director(outreq)
+	rp.Director(outreq)
 	outreq.Proto = "HTTP/1.1"
 	outreq.ProtoMajor = 1
 	outreq.ProtoMinor = 1
@@ -195,13 +200,21 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, outreq *http.Request, r
 		}
 		defer conn.Close()
 
-		backendConn, err := net.Dial("tcp", outreq.URL.Host)
-		if err != nil {
-			return err
+		var backendConn net.Conn
+		if hj, ok := transport.(*connHijackerTransport); ok {
+			backendConn = hj.Conn
+			if _, err := conn.Write(hj.Replay); err != nil {
+				return err
+			}
+			bufferPool.Put(hj.Replay)
+		} else {
+			backendConn, err = net.Dial("tcp", outreq.URL.Host)
+			if err != nil {
+				return err
+			}
+			outreq.Write(backendConn)
 		}
 		defer backendConn.Close()
-
-		outreq.Write(backendConn)
 
 		go func() {
 			io.Copy(backendConn, conn) // write tcp stream to backend.
@@ -214,21 +227,21 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, outreq *http.Request, r
 		}
 		copyHeader(rw.Header(), res.Header)
 		rw.WriteHeader(res.StatusCode)
-		p.copyResponse(rw, res.Body)
+		rp.copyResponse(rw, res.Body)
 	}
 
 	return nil
 }
 
-func (p *ReverseProxy) copyResponse(dst io.Writer, src io.Reader) {
+func (rp *ReverseProxy) copyResponse(dst io.Writer, src io.Reader) {
 	buf := bufferPool.Get()
 	defer bufferPool.Put(buf)
 
-	if p.FlushInterval != 0 {
+	if rp.FlushInterval != 0 {
 		if wf, ok := dst.(writeFlusher); ok {
 			mlw := &maxLatencyWriter{
 				dst:     wf,
-				latency: p.FlushInterval,
+				latency: rp.FlushInterval,
 				done:    make(chan bool),
 			}
 			go mlw.flushLoop()
@@ -237,6 +250,98 @@ func (p *ReverseProxy) copyResponse(dst io.Writer, src io.Reader) {
 		}
 	}
 	io.CopyBuffer(dst, src, buf.([]byte))
+}
+
+func copyHeader(dst, src http.Header) {
+	for k, vv := range src {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
+}
+
+// Hop-by-hop headers. These are removed when sent to the backend.
+// http://www.w3.org/Protocols/rfc2616/rfc2616-sec13.html
+var hopHeaders = []string{
+	"Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te", // canonicalized version of "TE"
+	"Trailers",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+type respUpdateFn func(resp *http.Response)
+
+type hijackedConn struct {
+	net.Conn
+	hj *connHijackerTransport
+}
+
+func (c *hijackedConn) Read(b []byte) (n int, err error) {
+	n, err = c.Conn.Read(b)
+	c.hj.Replay = append(c.hj.Replay, b[:n]...)
+	return
+}
+
+func (c *hijackedConn) Close() error {
+	return nil
+}
+
+type connHijackerTransport struct {
+	*http.Transport
+	Conn   net.Conn
+	Replay []byte
+}
+
+func newConnHijackerTransport(base http.RoundTripper) *connHijackerTransport {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		Dial: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).Dial,
+		TLSHandshakeTimeout: 10 * time.Second,
+		DisableKeepAlives:   true,
+	}
+	if base != nil {
+		if baseTransport, ok := base.(*http.Transport); ok {
+			transport.Proxy = baseTransport.Proxy
+			transport.TLSClientConfig = baseTransport.TLSClientConfig
+			transport.TLSHandshakeTimeout = baseTransport.TLSHandshakeTimeout
+			transport.Dial = baseTransport.Dial
+			transport.DialTLS = baseTransport.DialTLS
+			transport.DisableKeepAlives = true
+		}
+	}
+	hjTransport := &connHijackerTransport{transport, nil, bufferPool.Get().([]byte)[:0]}
+	oldDial := transport.Dial
+	oldDialTLS := transport.DialTLS
+	if oldDial == nil {
+		oldDial = (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).Dial
+	}
+	hjTransport.Dial = func(network, addr string) (net.Conn, error) {
+		c, err := oldDial(network, addr)
+		hjTransport.Conn = c
+		return &hijackedConn{c, hjTransport}, err
+	}
+	if oldDialTLS != nil {
+		hjTransport.DialTLS = func(network, addr string) (net.Conn, error) {
+			c, err := oldDialTLS(network, addr)
+			hjTransport.Conn = c
+			return &hijackedConn{c, hjTransport}, err
+		}
+	}
+	return hjTransport
+}
+
+func requestIsWebsocket(req *http.Request) bool {
+	return !(strings.ToLower(req.Header.Get("Upgrade")) != "websocket" || !strings.Contains(strings.ToLower(req.Header.Get("Connection")), "upgrade"))
 }
 
 type writeFlusher interface {

@@ -16,7 +16,8 @@ import (
 )
 
 var (
-	supportedPolicies = make(map[string]func() Policy)
+	supportedPolicies            = make(map[string]func() Policy)
+	warnedProxyHeaderDeprecation bool // TODO: Temporary, until proxy_header is removed entirely
 )
 
 type staticUpstream struct {
@@ -25,6 +26,7 @@ type staticUpstream struct {
 	downstreamHeaders  http.Header
 	Hosts              HostPool
 	Policy             Policy
+	KeepAlive          int
 	insecureSkipVerify bool
 
 	FailTimeout time.Duration
@@ -54,6 +56,7 @@ func NewStaticUpstreams(c caddyfile.Dispenser) ([]Upstream, error) {
 			FailTimeout:       10 * time.Second,
 			MaxFails:          1,
 			MaxConns:          0,
+			KeepAlive:         http.DefaultMaxIdleConnsPerHost,
 		}
 
 		if !c.Args(&upstream.from) {
@@ -154,9 +157,9 @@ func (u *staticUpstream) NewHost(host string) (*UpstreamHost, error) {
 		return nil, err
 	}
 
-	uh.ReverseProxy = NewSingleHostReverseProxy(baseURL, uh.WithoutPathPrefix)
+	uh.ReverseProxy = NewSingleHostReverseProxy(baseURL, uh.WithoutPathPrefix, u.KeepAlive)
 	if u.insecureSkipVerify {
-		uh.ReverseProxy.Transport = InsecureTransport
+		uh.ReverseProxy.UseInsecureTransport()
 	}
 
 	return uh, nil
@@ -278,6 +281,10 @@ func parseBlock(c *caddyfile.Dispenser, u *staticUpstream) error {
 		}
 		u.HealthCheck.Timeout = dur
 	case "proxy_header": // TODO: deprecate this shortly after 0.9
+		if !warnedProxyHeaderDeprecation {
+			fmt.Println("WARNING: proxy_header is deprecated and will be removed soon; use header_upstream instead.")
+			warnedProxyHeaderDeprecation = true
+		}
 		fallthrough
 	case "header_upstream":
 		var header, value string
@@ -312,6 +319,18 @@ func parseBlock(c *caddyfile.Dispenser, u *staticUpstream) error {
 		u.IgnoredSubPaths = ignoredPaths
 	case "insecure_skip_verify":
 		u.insecureSkipVerify = true
+	case "keepalive":
+		if !c.NextArg() {
+			return c.ArgErr()
+		}
+		n, err := strconv.Atoi(c.Val())
+		if err != nil {
+			return err
+		}
+		if n < 0 {
+			return c.ArgErr()
+		}
+		u.KeepAlive = n
 	default:
 		return c.Errf("unknown property '%s'", c.Val())
 	}
@@ -346,7 +365,7 @@ func (u *staticUpstream) HealthCheckWorker(stop chan struct{}) {
 	}
 }
 
-func (u *staticUpstream) Select() *UpstreamHost {
+func (u *staticUpstream) Select(r *http.Request) *UpstreamHost {
 	pool := u.Hosts
 	if len(pool) == 1 {
 		if !pool[0].Available() {
@@ -364,11 +383,10 @@ func (u *staticUpstream) Select() *UpstreamHost {
 	if allUnavailable {
 		return nil
 	}
-
 	if u.Policy == nil {
-		return (&Random{}).Select(pool)
+		return (&Random{}).Select(pool, r)
 	}
-	return u.Policy.Select(pool)
+	return u.Policy.Select(pool, r)
 }
 
 func (u *staticUpstream) AllowedPath(requestPath string) bool {

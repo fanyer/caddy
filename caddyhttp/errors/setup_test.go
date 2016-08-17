@@ -103,6 +103,27 @@ func TestErrorsParse(t *testing.T) {
 				LocalTime:  true,
 			},
 		}},
+		{`errors { log errors.txt
+        * generic_error.html
+        404 404.html
+        503 503.html
+}`, false, ErrorHandler{
+			LogFile:          "errors.txt",
+			GenericErrorPage: "generic_error.html",
+			ErrorPages: map[int]string{
+				404: "404.html",
+				503: "503.html",
+			},
+		}},
+		// Next two test cases is the detection of duplicate status codes
+		{`errors {
+        503 503.html
+        503 503.html
+}`, true, ErrorHandler{}},
+		{`errors {
+        * generic_error.html
+        * generic_error.html
+}`, true, ErrorHandler{}},
 	}
 	for i, test := range tests {
 		actualErrorsRule, err := errorsParse(caddy.NewTestController("http", test.inputErrorsRules))
@@ -111,6 +132,8 @@ func TestErrorsParse(t *testing.T) {
 			t.Errorf("Test %d didn't error, but it should have", i)
 		} else if err != nil && !test.shouldErr {
 			t.Errorf("Test %d errored, but it shouldn't have; got '%v'", i, err)
+		} else if err != nil && test.shouldErr {
+			continue
 		}
 		if actualErrorsRule.LogFile != test.expectedErrorHandler.LogFile {
 			t.Errorf("Test %d expected LogFile to be %s, but got %s",
@@ -149,6 +172,10 @@ func TestErrorsParse(t *testing.T) {
 				t.Fatalf("Test %d expected LogRoller LocalTime to be %t, but got %t",
 					i, test.expectedErrorHandler.LogRoller.LocalTime, actualErrorsRule.LogRoller.LocalTime)
 			}
+		}
+		if actualErrorsRule.GenericErrorPage != test.expectedErrorHandler.GenericErrorPage {
+			t.Fatalf("Test %d expected GenericErrorPage to be %v, but got %v",
+				i, test.expectedErrorHandler.GenericErrorPage, actualErrorsRule.GenericErrorPage)
 		}
 	}
 

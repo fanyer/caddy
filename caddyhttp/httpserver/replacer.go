@@ -1,6 +1,9 @@
 package httpserver
 
 import (
+	"bytes"
+	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -84,9 +87,6 @@ func NewReplacer(r *http.Request, rr *ResponseRecorder, emptyValue string) Repla
 			"{fragment}":      func() string { return r.URL.Fragment },
 			"{proto}":         func() string { return r.Proto },
 			"{remote}": func() string {
-				if fwdFor := r.Header.Get("X-Forwarded-For"); fwdFor != "" {
-					return fwdFor
-				}
 				host, _, err := net.SplitHostPort(r.RemoteAddr)
 				if err != nil {
 					return r.RemoteAddr
@@ -119,6 +119,18 @@ func NewReplacer(r *http.Request, rr *ResponseRecorder, emptyValue string) Repla
 
 				return requestReplacer.Replace(string(dump))
 			},
+			"{request_body}": func() string {
+				if !canLogRequest(r) {
+					return ""
+				}
+
+				body, err := readRequestBody(r, maxLogBodySize)
+				if err != nil {
+					return ""
+				}
+
+				return requestReplacer.Replace(string(body))
+			},
 		},
 		emptyValue: emptyValue,
 	}
@@ -130,6 +142,39 @@ func NewReplacer(r *http.Request, rr *ResponseRecorder, emptyValue string) Repla
 	}
 
 	return rep
+}
+
+func canLogRequest(r *http.Request) bool {
+	if r.Method == "POST" || r.Method == "PUT" {
+		for _, cType := range r.Header[headerContentType] {
+			// the cType could have charset and other info
+			if strings.Index(cType, contentTypeJSON) > -1 || strings.Index(cType, contentTypeXML) > -1 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// readRequestBody reads the request body and sets a
+// new io.ReadCloser that has not yet been read.
+func readRequestBody(r *http.Request, n int64) ([]byte, error) {
+	defer r.Body.Close()
+
+	body, err := ioutil.ReadAll(io.LimitReader(r.Body, n))
+	if err != nil {
+		return nil, err
+	}
+
+	// Read the remaining bytes
+	remaining, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	buf := bytes.NewBuffer(append(body, remaining...))
+	r.Body = ioutil.NopCloser(buf)
+	return body, nil
 }
 
 // Replace performs a replacement of values on s and returns
@@ -144,7 +189,10 @@ func (r *replacer) Replace(s string) string {
 	if r.responseRecorder != nil {
 		r.replacements["{status}"] = func() string { return strconv.Itoa(r.responseRecorder.status) }
 		r.replacements["{size}"] = func() string { return strconv.Itoa(r.responseRecorder.size) }
-		r.replacements["{latency}"] = func() string { return time.Since(r.responseRecorder.start).String() }
+		r.replacements["{latency}"] = func() string {
+			dur := time.Since(r.responseRecorder.start)
+			return roundDuration(dur).String()
+		}
 	}
 
 	// Include custom placeholders, overwriting existing ones if necessary
@@ -187,12 +235,46 @@ func (r *replacer) Replace(s string) string {
 	return s
 }
 
+func roundDuration(d time.Duration) time.Duration {
+	if d >= time.Millisecond {
+		return round(d, time.Millisecond)
+	} else if d >= time.Microsecond {
+		return round(d, time.Microsecond)
+	}
+
+	return d
+}
+
+// round rounds d to the nearest r
+func round(d, r time.Duration) time.Duration {
+	if r <= 0 {
+		return d
+	}
+	neg := d < 0
+	if neg {
+		d = -d
+	}
+	if m := d % r; m+m < r {
+		d = d - m
+	} else {
+		d = d + r - m
+	}
+	if neg {
+		return -d
+	}
+	return d
+}
+
 // Set sets key to value in the r.customReplacements map.
 func (r *replacer) Set(key, value string) {
 	r.customReplacements["{"+key+"}"] = func() string { return value }
 }
 
 const (
-	timeFormat     = "02/Jan/2006:15:04:05 -0700"
-	headerReplacer = "{>"
+	timeFormat        = "02/Jan/2006:15:04:05 -0700"
+	headerReplacer    = "{>"
+	headerContentType = "Content-Type"
+	contentTypeJSON   = "application/json"
+	contentTypeXML    = "application/xml"
+	maxLogBodySize    = 100 * 1024
 )

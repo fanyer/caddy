@@ -103,17 +103,27 @@ var newACMEClient = func(config *Config, allowPrompts bool) (*ACMEClient, error)
 		// Use HTTP and TLS-SNI challenges by default
 
 		// See if HTTP challenge needs to be proxied
+		useHTTPPort := "" // empty port value will use challenge default
 		if caddy.HasListenerWithAddress(net.JoinHostPort(config.ListenHost, HTTPChallengePort)) {
-			altPort := config.AltHTTPPort
-			if altPort == "" {
-				altPort = DefaultHTTPAlternatePort
+			useHTTPPort = config.AltHTTPPort
+			if useHTTPPort == "" {
+				useHTTPPort = DefaultHTTPAlternatePort
 			}
-			c.SetHTTPAddress(net.JoinHostPort(config.ListenHost, altPort))
 		}
 
 		// See if TLS challenge needs to be handled by our own facilities
 		if caddy.HasListenerWithAddress(net.JoinHostPort(config.ListenHost, TLSSNIChallengePort)) {
 			c.SetChallengeProvider(acme.TLSSNI01, tlsSniSolver{})
+		}
+
+		// Always respect user's bind preferences by using config.ListenHost
+		err := c.SetHTTPAddress(net.JoinHostPort(config.ListenHost, useHTTPPort))
+		if err != nil {
+			return nil, err
+		}
+		err = c.SetTLSAddress(net.JoinHostPort(config.ListenHost, ""))
+		if err != nil {
+			return nil, err
 		}
 	} else {
 		// Otherwise, DNS challenge it is
@@ -124,8 +134,8 @@ var newACMEClient = func(config *Config, allowPrompts bool) (*ACMEClient, error)
 			return nil, errors.New("unknown DNS provider by name '" + config.DNSProvider + "'")
 		}
 
-		// we could pass credentials to create the provider, but for now
-		// we just let the solver package get them from the environment
+		// We could pass credentials to create the provider, but for now
+		// just let the solver package get them from the environment
 		prov, err := provFn()
 		if err != nil {
 			return nil, err
@@ -144,9 +154,11 @@ var newACMEClient = func(config *Config, allowPrompts bool) (*ACMEClient, error)
 func (c *ACMEClient) Obtain(names []string) error {
 Attempts:
 	for attempts := 0; attempts < 2; attempts++ {
+		namesObtaining.Add(names)
 		acmeMu.Lock()
 		certificate, failures := c.ObtainCertificate(names, true, nil)
 		acmeMu.Unlock()
+		namesObtaining.Remove(names)
 		if len(failures) > 0 {
 			// Error - try to fix it or report it to the user and abort
 			var errMsg string             // we'll combine all the failures into a single error message
@@ -234,9 +246,11 @@ func (c *ACMEClient) Renew(name string) error {
 	var newCertMeta acme.CertificateResource
 	var success bool
 	for attempts := 0; attempts < 2; attempts++ {
+		namesObtaining.Add([]string{name})
 		acmeMu.Lock()
 		newCertMeta, err = c.RenewCertificate(certMeta, true)
 		acmeMu.Unlock()
+		namesObtaining.Remove([]string{name})
 		if err == nil {
 			success = true
 			break
@@ -293,4 +307,48 @@ func (c *ACMEClient) Revoke(name string) error {
 	}
 
 	return nil
+}
+
+// namesObtaining is a set of hostnames with thread-safe
+// methods. A name should be in this set only while this
+// package is in the process of obtaining a certificate
+// for the name. ACME challenges that are received for
+// names which are not in this set were not initiated by
+// this package and probably should not be handled by
+// this package.
+var namesObtaining = nameCoordinator{names: make(map[string]struct{})}
+
+type nameCoordinator struct {
+	names map[string]struct{}
+	mu    sync.RWMutex
+}
+
+// Add adds names to c. It is safe for concurrent use.
+func (c *nameCoordinator) Add(names []string) {
+	c.mu.Lock()
+	for _, name := range names {
+		c.names[strings.ToLower(name)] = struct{}{}
+	}
+	c.mu.Unlock()
+}
+
+// Remove removes names from c. It is safe for concurrent use.
+func (c *nameCoordinator) Remove(names []string) {
+	c.mu.Lock()
+	for _, name := range names {
+		delete(c.names, strings.ToLower(name))
+	}
+	c.mu.Unlock()
+}
+
+// Has returns true if c has name. It is safe for concurrent use.
+func (c *nameCoordinator) Has(name string) bool {
+	hostname, _, err := net.SplitHostPort(name)
+	if err != nil {
+		hostname = name
+	}
+	c.mu.RLock()
+	_, ok := c.names[strings.ToLower(hostname)]
+	c.mu.RUnlock()
+	return ok
 }
