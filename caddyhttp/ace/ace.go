@@ -45,6 +45,8 @@ func (a Ace) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
 		}
 	}
 
+	fmt.Println("ace!!")
+
 	if cfg == nil {
 		return a.Next.ServeHTTP(w, r) // exit early
 	}
@@ -63,10 +65,10 @@ func (a Ace) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
 		filename = "index"
 	}
 
-	tpl, err := ace.Load("."+basepath+"base", "."+basepath+filename, nil)
+	tpl, err := ace.Load("."+basepath+"base", "."+basepath+filename, &ace.Options{DynamicReload: true})
 
 	if err != nil {
-		fmt.Println(err)
+		// fmt.Println(err)
 		// http.NotFound(w, r)
 		return a.Next.ServeHTTP(w, r)
 	}
