@@ -44,7 +44,6 @@ const FCGINullRequestID uint8 = 0
 
 // FCGIKeepConn describes keep connection mode.
 const FCGIKeepConn uint8 = 1
-const doubleCRLF = "\r\n\r\n"
 
 const (
 	// BeginRequest is the begin request flag.
@@ -138,7 +137,7 @@ func (rec *record) read(r io.Reader) (buf []byte, err error) {
 		return
 	}
 	if rec.h.Version != 1 {
-		err = errors.New("fcgi: invalid header version")
+		err = errInvalidHeaderVersion
 		return
 	}
 	if rec.h.Type == EndRequest {
@@ -193,9 +192,9 @@ func Dial(network, address string) (fcgi *FCGIClient, err error) {
 	return DialWithDialer(network, address, net.Dialer{})
 }
 
-// Close closes fcgi connnection
-func (c *FCGIClient) Close() {
-	c.rwc.Close()
+// Close closes fcgi connnection.
+func (c *FCGIClient) Close() error {
+	return c.rwc.Close()
 }
 
 func (c *FCGIClient) writeRecord(recType uint8, content []byte) (err error) {
@@ -259,29 +258,6 @@ func (c *FCGIClient) writePairs(recType uint8, pairs map[string]string) error {
 	}
 	w.Close()
 	return nil
-}
-
-func readSize(s []byte) (uint32, int) {
-	if len(s) == 0 {
-		return 0, 0
-	}
-	size, n := uint32(s[0]), 1
-	if size&(1<<7) != 0 {
-		if len(s) < 4 {
-			return 0, 0
-		}
-		n = 4
-		size = binary.BigEndian.Uint32(s)
-		size &^= 1 << 31
-	}
-	return size, n
-}
-
-func readString(s []byte, size uint32) string {
-	if size > uint32(len(s)) {
-		return ""
-	}
-	return string(s[:size])
 }
 
 func encodeSize(b []byte, size uint32) int {
@@ -358,7 +334,9 @@ func (w *streamReader) Read(p []byte) (n int, err error) {
 				rec := &record{}
 				var buf []byte
 				buf, err = rec.read(w.c.rwc)
-				if err != nil {
+				if err == errInvalidHeaderVersion {
+					continue
+				} else if err != nil {
 					return
 				}
 				// standard error output
@@ -385,7 +363,7 @@ func (w *streamReader) Read(p []byte) (n int, err error) {
 // Do made the request and returns a io.Reader that translates the data read
 // from fcgi responder out of fcgi packet before returning it.
 func (c *FCGIClient) Do(p map[string]string, req io.Reader) (r io.Reader, err error) {
-	err = c.writeBeginRequest(uint16(Responder), 0)
+	err = c.writeBeginRequest(uint16(Responder), FCGIKeepConn)
 	if err != nil {
 		return
 	}
@@ -408,11 +386,11 @@ func (c *FCGIClient) Do(p map[string]string, req io.Reader) (r io.Reader, err er
 // clientCloser is a io.ReadCloser. It wraps a io.Reader with a Closer
 // that closes FCGIClient connection.
 type clientCloser struct {
-	*FCGIClient
+	f *FCGIClient
 	io.Reader
 }
 
-func (f clientCloser) Close() error { return f.rwc.Close() }
+func (c clientCloser) Close() error { return c.f.Close() }
 
 // Request returns a HTTP Response with Header and Body
 // from fcgi responder
@@ -546,6 +524,9 @@ func (c *FCGIClient) PostFile(p map[string]string, data url.Values, file map[str
 			return nil, e
 		}
 		_, err = io.Copy(part, fd)
+		if err != nil {
+			return
+		}
 	}
 
 	err = writer.Close()
@@ -558,3 +539,5 @@ func (c *FCGIClient) PostFile(p map[string]string, data url.Values, file map[str
 
 // Checks whether chunked is part of the encodings stack
 func chunked(te []string) bool { return len(te) > 0 && te[0] == "chunked" }
+
+var errInvalidHeaderVersion = errors.New("fcgi: invalid header version")

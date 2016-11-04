@@ -105,6 +105,14 @@ func setupTLS(c *caddy.Controller) error {
 					}
 					config.Ciphers = append(config.Ciphers, value)
 				}
+			case "curves":
+				for c.NextArg() {
+					value, ok := supportedCurvesMap[strings.ToUpper(c.Val())]
+					if !ok {
+						return c.Errf("Wrong curve name or curve not supported: '%s'", c.Val())
+					}
+					config.CurvePreferences = append(config.CurvePreferences, value)
+				}
 			case "clients":
 				clientCertList := c.RemainingArgs()
 				if len(clientCertList) == 0 {
@@ -146,6 +154,18 @@ func setupTLS(c *caddy.Controller) error {
 					return c.Errf("Unsupported DNS provider '%s'", args[0])
 				}
 				config.DNSProvider = args[0]
+			case "storage":
+				args := c.RemainingArgs()
+				if len(args) != 1 {
+					return c.ArgErr()
+				}
+				storageProvName := args[0]
+				if _, ok := storageProviders[storageProvName]; !ok {
+					return c.Errf("Unsupported Storage provider '%s'", args[0])
+				}
+				config.StorageProvider = args[0]
+			case "muststaple":
+				config.MustStaple = true
 			default:
 				return c.Errf("Unknown keyword '%s'", c.Val())
 			}

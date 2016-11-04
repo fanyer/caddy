@@ -103,6 +103,7 @@ func TestSetupParseWithOptionalParams(t *testing.T) {
 	params := `tls ` + certFile + ` ` + keyFile + ` {
             protocols tls1.0 tls1.2
             ciphers RSA-AES256-CBC-SHA ECDHE-RSA-AES128-GCM-SHA256 ECDHE-ECDSA-AES256-GCM-SHA384
+            muststaple
         }`
 	cfg := new(Config)
 	RegisterConfigGetter("", func(c *caddy.Controller) *Config { return cfg })
@@ -123,6 +124,10 @@ func TestSetupParseWithOptionalParams(t *testing.T) {
 
 	if len(cfg.Ciphers)-1 != 3 {
 		t.Errorf("Expected 3 Ciphers (not including TLS_FALLBACK_SCSV), got %v", len(cfg.Ciphers)-1)
+	}
+
+	if !cfg.MustStaple {
+		t.Errorf("Expected must staple to be true")
 	}
 }
 
@@ -171,6 +176,18 @@ func TestSetupParseWithWrongOptionalParams(t *testing.T) {
 	// Test key_type wrong params
 	params = `tls {
 			key_type ab123
+		}`
+	cfg = new(Config)
+	RegisterConfigGetter("", func(c *caddy.Controller) *Config { return cfg })
+	c = caddy.NewTestController("", params)
+	err = setupTLS(c)
+	if err == nil {
+		t.Errorf("Expected errors, but no error returned")
+	}
+
+	// Test curves wrong params
+	params = `tls {
+			curves ab123, cd456, ef789
 		}`
 	cfg = new(Config)
 	RegisterConfigGetter("", func(c *caddy.Controller) *Config { return cfg })
@@ -266,6 +283,33 @@ func TestSetupParseWithKeyType(t *testing.T) {
 
 	if cfg.KeyType != acme.EC384 {
 		t.Errorf("Expected 'P384' as KeyType, got %#v", cfg.KeyType)
+	}
+}
+
+func TestSetupParseWithCurves(t *testing.T) {
+	params := `tls {
+            curves p256 p384 p521
+        }`
+	cfg := new(Config)
+	RegisterConfigGetter("", func(c *caddy.Controller) *Config { return cfg })
+	c := caddy.NewTestController("", params)
+
+	err := setupTLS(c)
+	if err != nil {
+		t.Errorf("Expected no errors, got: %v", err)
+	}
+
+	if len(cfg.CurvePreferences) != 3 {
+		t.Errorf("Expected 3 curves, got %v", len(cfg.CurvePreferences))
+	}
+
+	expectedCurves := []tls.CurveID{tls.CurveP256, tls.CurveP384, tls.CurveP521}
+
+	// Ensure ordering is correct
+	for i, actual := range cfg.CurvePreferences {
+		if actual != expectedCurves[i] {
+			t.Errorf("Expected curve in position %d to be %v, got %v", i, expectedCurves[i], actual)
+		}
 	}
 }
 

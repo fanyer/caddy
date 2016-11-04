@@ -1,9 +1,11 @@
 package storagetest
 
 import (
-	"github.com/mholt/caddy/caddytls"
+	"errors"
 	"net/url"
 	"sync"
+
+	"github.com/mholt/caddy/caddytls"
 )
 
 // memoryMutex is a mutex used to control access to memoryStoragesByCAURL.
@@ -49,9 +51,9 @@ func NewInMemoryStorage() *InMemoryStorage {
 }
 
 // SiteExists implements caddytls.Storage.SiteExists in memory.
-func (s *InMemoryStorage) SiteExists(domain string) bool {
+func (s *InMemoryStorage) SiteExists(domain string) (bool, error) {
 	_, siteExists := s.Sites[domain]
-	return siteExists
+	return siteExists, nil
 }
 
 // Clear completely clears all values associated with this storage.
@@ -65,7 +67,7 @@ func (s *InMemoryStorage) Clear() {
 func (s *InMemoryStorage) LoadSite(domain string) (*caddytls.SiteData, error) {
 	siteData, ok := s.Sites[domain]
 	if !ok {
-		return nil, caddytls.ErrStorageNotFound
+		return nil, caddytls.ErrNotExist(errors.New("not found"))
 	}
 	return siteData, nil
 }
@@ -89,21 +91,21 @@ func (s *InMemoryStorage) StoreSite(domain string, data *caddytls.SiteData) erro
 // DeleteSite implements caddytls.Storage.DeleteSite in memory.
 func (s *InMemoryStorage) DeleteSite(domain string) error {
 	if _, ok := s.Sites[domain]; !ok {
-		return caddytls.ErrStorageNotFound
+		return caddytls.ErrNotExist(errors.New("not found"))
 	}
 	delete(s.Sites, domain)
 	return nil
 }
 
-// LockRegister implements Storage.LockRegister by just returning true because
-// it is not a multi-server storage implementation.
-func (s *InMemoryStorage) LockRegister(domain string) (bool, error) {
-	return true, nil
+// TryLock implements Storage.TryLock by returning nil values because it
+// is not a multi-server storage implementation.
+func (s *InMemoryStorage) TryLock(domain string) (caddytls.Waiter, error) {
+	return nil, nil
 }
 
-// UnlockRegister implements Storage.UnlockRegister as a no-op because it is
+// Unlock implements Storage.Unlock as a no-op because it is
 // not a multi-server storage implementation.
-func (s *InMemoryStorage) UnlockRegister(domain string) error {
+func (s *InMemoryStorage) Unlock(domain string) error {
 	return nil
 }
 
@@ -111,7 +113,7 @@ func (s *InMemoryStorage) UnlockRegister(domain string) error {
 func (s *InMemoryStorage) LoadUser(email string) (*caddytls.UserData, error) {
 	userData, ok := s.Users[email]
 	if !ok {
-		return nil, caddytls.ErrStorageNotFound
+		return nil, caddytls.ErrNotExist(errors.New("not found"))
 	}
 	return userData, nil
 }

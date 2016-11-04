@@ -17,9 +17,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mholt/caddy/caddyhttp/httpserver"
 )
 
 var bufferPool = sync.Pool{New: createBuffer}
@@ -53,18 +56,6 @@ type ReverseProxy struct {
 	FlushInterval time.Duration
 }
 
-func singleJoiningSlash(a, b string) string {
-	aslash := strings.HasSuffix(a, "/")
-	bslash := strings.HasPrefix(b, "/")
-	switch {
-	case aslash && bslash:
-		return a + b[1:]
-	case !aslash && !bslash:
-		return a + "/" + b
-	}
-	return a + b
-}
-
 // Though the relevant directive prefix is just "unix:", url.Parse
 // will - assuming the regular URL scheme - add additional slashes
 // as if "unix" was a request protocol.
@@ -95,12 +86,25 @@ func NewSingleHostReverseProxy(target *url.URL, without string, keepalive int) *
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 		}
-		req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
-		if targetQuery == "" || req.URL.RawQuery == "" {
-			req.URL.RawQuery = targetQuery + req.URL.RawQuery
-		} else {
-			req.URL.RawQuery = targetQuery + "&" + req.URL.RawQuery
+
+		// We should remove the `without` prefix at first.
+		if without != "" {
+			req.URL.Path = strings.TrimPrefix(req.URL.Path, without)
+			if req.URL.Opaque != "" {
+				req.URL.Opaque = strings.TrimPrefix(req.URL.Opaque, without)
+			}
+			if req.URL.RawPath != "" {
+				req.URL.RawPath = strings.TrimPrefix(req.URL.RawPath, without)
+			}
 		}
+
+		hadTrailingSlash := strings.HasSuffix(req.URL.Path, "/")
+		req.URL.Path = path.Join(target.Path, req.URL.Path)
+		// path.Join will strip off the last /, so put it back if it was there.
+		if hadTrailingSlash && !strings.HasSuffix(req.URL.Path, "/") {
+			req.URL.Path = req.URL.Path + "/"
+		}
+
 		// Trims the path of the socket from the URL path.
 		// This is done because req.URL passed to your proxied service
 		// will have the full path of the socket file prefixed to it.
@@ -112,9 +116,11 @@ func NewSingleHostReverseProxy(target *url.URL, without string, keepalive int) *
 			socketPrefix := target.String()[len("unix://"):]
 			req.URL.Path = strings.TrimPrefix(req.URL.Path, socketPrefix)
 		}
-		// We are then safe to remove the `without` prefix.
-		if without != "" {
-			req.URL.Path = strings.TrimPrefix(req.URL.Path, without)
+
+		if targetQuery == "" || req.URL.RawQuery == "" {
+			req.URL.RawQuery = targetQuery + req.URL.RawQuery
+		} else {
+			req.URL.RawQuery = targetQuery + "&" + req.URL.RawQuery
 		}
 	}
 	rp := &ReverseProxy{Director: director, FlushInterval: 250 * time.Millisecond} // flushing good for streaming & server-sent events
@@ -191,7 +197,7 @@ func (rp *ReverseProxy) ServeHTTP(rw http.ResponseWriter, outreq *http.Request, 
 		res.Body.Close()
 		hj, ok := rw.(http.Hijacker)
 		if !ok {
-			return nil
+			panic(httpserver.NonHijackerError{Underlying: rw})
 		}
 
 		conn, _, err := hj.Hijack()
@@ -252,8 +258,28 @@ func (rp *ReverseProxy) copyResponse(dst io.Writer, src io.Reader) {
 	io.CopyBuffer(dst, src, buf.([]byte))
 }
 
+// skip these headers if they already exist.
+// see https://github.com/mholt/caddy/pull/1112#discussion_r80092582
+var skipHeaders = map[string]struct{}{
+	"Content-Type":        {},
+	"Content-Disposition": {},
+	"Accept-Ranges":       {},
+	"Set-Cookie":          {},
+	"Cache-Control":       {},
+	"Expires":             {},
+}
+
 func copyHeader(dst, src http.Header) {
 	for k, vv := range src {
+		if _, ok := dst[k]; ok {
+			// skip some predefined headers
+			// see https://github.com/mholt/caddy/issues/1086
+			if _, shouldSkip := skipHeaders[k]; shouldSkip {
+				continue
+			}
+			// otherwise, overwrite
+			dst.Del(k)
+		}
 		for _, v := range vv {
 			dst.Add(k, v)
 		}
@@ -271,6 +297,8 @@ var hopHeaders = []string{
 	"Trailers",
 	"Transfer-Encoding",
 	"Upgrade",
+	"Alternate-Protocol",
+	"Alt-Svc",
 }
 
 type respUpdateFn func(resp *http.Response)
@@ -304,7 +332,7 @@ func newConnHijackerTransport(base http.RoundTripper) *connHijackerTransport {
 			KeepAlive: 30 * time.Second,
 		}).Dial,
 		TLSHandshakeTimeout: 10 * time.Second,
-		DisableKeepAlives:   true,
+		MaxIdleConnsPerHost: -1,
 	}
 	if base != nil {
 		if baseTransport, ok := base.(*http.Transport); ok {
@@ -313,7 +341,7 @@ func newConnHijackerTransport(base http.RoundTripper) *connHijackerTransport {
 			transport.TLSHandshakeTimeout = baseTransport.TLSHandshakeTimeout
 			transport.Dial = baseTransport.Dial
 			transport.DialTLS = baseTransport.DialTLS
-			transport.DisableKeepAlives = true
+			transport.MaxIdleConnsPerHost = -1
 		}
 	}
 	hjTransport := &connHijackerTransport{transport, nil, bufferPool.Get().([]byte)[:0]}

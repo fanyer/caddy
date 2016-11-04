@@ -34,6 +34,7 @@ func init() {
 	flag.StringVar(&cpu, "cpu", "100%", "CPU cap")
 	flag.BoolVar(&plugins, "plugins", false, "List installed plugins")
 	flag.StringVar(&caddytls.DefaultEmail, "email", "", "Default ACME CA account email address")
+	flag.DurationVar(&acme.HTTPClient.Timeout, "catimeout", acme.HTTPClient.Timeout, "Default ACME CA HTTP timeout")
 	flag.StringVar(&logfile, "log", "", "Process log file")
 	flag.StringVar(&caddy.PidFile, "pidfile", "", "Path to write pid file")
 	flag.BoolVar(&caddy.Quiet, "quiet", false, "Quiet mode (no initialization output)")
@@ -48,7 +49,6 @@ func init() {
 // Run is Caddy's main() function.
 func Run() {
 	flag.Parse()
-	moveStorage() // TODO: This is temporary for the 0.9 release, or until most users upgrade to 0.9+
 
 	caddy.AppName = appName
 	caddy.AppVersion = appVersion
@@ -75,7 +75,7 @@ func Run() {
 	if revoke != "" {
 		err := caddytls.Revoke(revoke)
 		if err != nil {
-			log.Fatal(err)
+			mustLogFatalf(err.Error())
 		}
 		fmt.Printf("Revoked certificate for %s\n", revoke)
 		os.Exit(0)
@@ -92,39 +92,41 @@ func Run() {
 		os.Exit(0)
 	}
 
+	moveStorage() // TODO: This is temporary for the 0.9 release, or until most users upgrade to 0.9+
+
 	// Set CPU cap
 	err := setCPU(cpu)
 	if err != nil {
-		mustLogFatal(err)
+		mustLogFatalf(err.Error())
 	}
 
 	// Get Caddyfile input
 	caddyfile, err := caddy.LoadCaddyfile(serverType)
 	if err != nil {
-		mustLogFatal(err)
+		mustLogFatalf(err.Error())
 	}
 
 	// Start your engines
 	instance, err := caddy.Start(caddyfile)
 	if err != nil {
-		mustLogFatal(err)
+		mustLogFatalf(err.Error())
 	}
 
 	// Twiddle your thumbs
 	instance.Wait()
 }
 
-// mustLogFatal wraps log.Fatal() in a way that ensures the
+// mustLogFatalf wraps log.Fatalf() in a way that ensures the
 // output is always printed to stderr so the user can see it
 // if the user is still there, even if the process log was not
 // enabled. If this process is an upgrade, however, and the user
 // might not be there anymore, this just logs to the process
 // log and exits.
-func mustLogFatal(args ...interface{}) {
+func mustLogFatalf(format string, args ...interface{}) {
 	if !caddy.IsUpgrade() {
 		log.SetOutput(os.Stderr)
 	}
-	log.Fatal(args...)
+	log.Fatalf(format, args...)
 }
 
 // confLoader loads the Caddyfile using the -conf flag.
@@ -134,7 +136,7 @@ func confLoader(serverType string) (caddy.Input, error) {
 	}
 
 	if conf == "stdin" {
-		return caddy.CaddyfileFromPipe(os.Stdin)
+		return caddy.CaddyfileFromPipe(os.Stdin, serverType)
 	}
 
 	contents, err := ioutil.ReadFile(conf)
@@ -176,16 +178,16 @@ func moveStorage() {
 	// Just use a default config to get default (file) storage
 	fileStorage, err := new(caddytls.Config).StorageFor(caddytls.DefaultCAUrl)
 	if err != nil {
-		log.Fatalf("[ERROR] Unable to get new path for certificate storage: %v", err)
+		mustLogFatalf("[ERROR] Unable to get new path for certificate storage: %v", err)
 	}
-	newPath := string(fileStorage.(caddytls.FileStorage))
+	newPath := fileStorage.(*caddytls.FileStorage).Path
 	err = os.MkdirAll(string(newPath), 0700)
 	if err != nil {
-		log.Fatalf("[ERROR] Unable to make new certificate storage path: %v\n\nPlease follow instructions at:\nhttps://github.com/mholt/caddy/issues/902#issuecomment-228876011", err)
+		mustLogFatalf("[ERROR] Unable to make new certificate storage path: %v\n\nPlease follow instructions at:\nhttps://github.com/mholt/caddy/issues/902#issuecomment-228876011", err)
 	}
 	err = os.Rename(oldPath, string(newPath))
 	if err != nil {
-		log.Fatalf("[ERROR] Unable to migrate certificate storage: %v\n\nPlease follow instructions at:\nhttps://github.com/mholt/caddy/issues/902#issuecomment-228876011", err)
+		mustLogFatalf("[ERROR] Unable to migrate certificate storage: %v\n\nPlease follow instructions at:\nhttps://github.com/mholt/caddy/issues/902#issuecomment-228876011", err)
 	}
 	// convert mixed case folder and file names to lowercase
 	var done bool // walking is recursive and preloads the file names, so we must restart walk after a change until no changes
@@ -198,7 +200,7 @@ func moveStorage() {
 				lowerPath := filepath.Join(filepath.Dir(path), lowerBase)
 				err = os.Rename(path, lowerPath)
 				if err != nil {
-					log.Fatalf("[ERROR] Unable to lower-case: %v\n\nPlease follow instructions at:\nhttps://github.com/mholt/caddy/issues/902#issuecomment-228876011", err)
+					mustLogFatalf("[ERROR] Unable to lower-case: %v\n\nPlease follow instructions at:\nhttps://github.com/mholt/caddy/issues/902#issuecomment-228876011", err)
 				}
 				// terminate traversal and restart since Walk needs the updated file list with new file names
 				done = false

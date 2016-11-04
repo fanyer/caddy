@@ -103,7 +103,7 @@ func getUser(storage Storage, email string) (User, error) {
 	// open user reg
 	userData, err := storage.LoadUser(email)
 	if err != nil {
-		if err == ErrStorageNotFound {
+		if _, ok := err.(ErrNotExist); ok {
 			// create a new user
 			return newUser(email)
 		}
@@ -118,11 +118,7 @@ func getUser(storage Storage, email string) (User, error) {
 
 	// load their private key
 	user.key, err = loadPrivateKey(userData.Key)
-	if err != nil {
-		return user, err
-	}
-
-	return user, nil
+	return user, err
 }
 
 // saveUser persists a user's key and account registration

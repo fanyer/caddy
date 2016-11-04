@@ -21,25 +21,26 @@ var (
 )
 
 type staticUpstream struct {
-	from               string
-	upstreamHeaders    http.Header
-	downstreamHeaders  http.Header
-	Hosts              HostPool
-	Policy             Policy
-	KeepAlive          int
-	insecureSkipVerify bool
-
-	FailTimeout time.Duration
-	MaxFails    int32
-	MaxConns    int64
-	HealthCheck struct {
+	from              string
+	upstreamHeaders   http.Header
+	downstreamHeaders http.Header
+	Hosts             HostPool
+	Policy            Policy
+	KeepAlive         int
+	FailTimeout       time.Duration
+	TryDuration       time.Duration
+	TryInterval       time.Duration
+	MaxConns          int64
+	HealthCheck       struct {
 		Client   http.Client
 		Path     string
 		Interval time.Duration
 		Timeout  time.Duration
 	}
-	WithoutPathPrefix string
-	IgnoredSubPaths   []string
+	WithoutPathPrefix  string
+	IgnoredSubPaths    []string
+	insecureSkipVerify bool
+	MaxFails           int32
 }
 
 // NewStaticUpstreams parses the configuration input and sets up
@@ -53,8 +54,8 @@ func NewStaticUpstreams(c caddyfile.Dispenser) ([]Upstream, error) {
 			downstreamHeaders: make(http.Header),
 			Hosts:             nil,
 			Policy:            &Random{},
-			FailTimeout:       10 * time.Second,
 			MaxFails:          1,
+			TryInterval:       250 * time.Millisecond,
 			MaxConns:          0,
 			KeepAlive:         http.DefaultMaxIdleConnsPerHost,
 		}
@@ -114,11 +115,6 @@ func NewStaticUpstreams(c caddyfile.Dispenser) ([]Upstream, error) {
 	return upstreams, nil
 }
 
-// RegisterPolicy adds a custom policy to the proxy.
-func RegisterPolicy(name string, policy func() Policy) {
-	supportedPolicies[name] = policy
-}
-
 func (u *staticUpstream) From() string {
 	return u.from
 }
@@ -141,8 +137,7 @@ func (u *staticUpstream) NewHost(host string) (*UpstreamHost, error) {
 				if uh.Unhealthy {
 					return true
 				}
-				if uh.Fails >= u.MaxFails &&
-					u.MaxFails != 0 {
+				if uh.Fails >= u.MaxFails {
 					return true
 				}
 				return false
@@ -237,7 +232,28 @@ func parseBlock(c *caddyfile.Dispenser, u *staticUpstream) error {
 		if err != nil {
 			return err
 		}
+		if n < 1 {
+			return c.Err("max_fails must be at least 1")
+		}
 		u.MaxFails = int32(n)
+	case "try_duration":
+		if !c.NextArg() {
+			return c.ArgErr()
+		}
+		dur, err := time.ParseDuration(c.Val())
+		if err != nil {
+			return err
+		}
+		u.TryDuration = dur
+	case "try_interval":
+		if !c.NextArg() {
+			return c.ArgErr()
+		}
+		interval, err := time.ParseDuration(c.Val())
+		if err != nil {
+			return err
+		}
+		u.TryInterval = interval
 	case "max_conns":
 		if !c.NextArg() {
 			return c.ArgErr()
@@ -289,13 +305,19 @@ func parseBlock(c *caddyfile.Dispenser, u *staticUpstream) error {
 	case "header_upstream":
 		var header, value string
 		if !c.Args(&header, &value) {
-			return c.ArgErr()
+			// When removing a header, the value can be optional.
+			if !strings.HasPrefix(header, "-") {
+				return c.ArgErr()
+			}
 		}
 		u.upstreamHeaders.Add(header, value)
 	case "header_downstream":
 		var header, value string
 		if !c.Args(&header, &value) {
-			return c.ArgErr()
+			// When removing a header, the value can be optional.
+			if !strings.HasPrefix(header, "-") {
+				return c.ArgErr()
+			}
 		}
 		u.downstreamHeaders.Add(header, value)
 	case "transparent":
@@ -396,4 +418,19 @@ func (u *staticUpstream) AllowedPath(requestPath string) bool {
 		}
 	}
 	return true
+}
+
+// GetTryDuration returns u.TryDuration.
+func (u *staticUpstream) GetTryDuration() time.Duration {
+	return u.TryDuration
+}
+
+// GetTryInterval returns u.TryInterval.
+func (u *staticUpstream) GetTryInterval() time.Duration {
+	return u.TryInterval
+}
+
+// RegisterPolicy adds a custom policy to the proxy.
+func RegisterPolicy(name string, policy func() Policy) {
+	supportedPolicies[name] = policy
 }

@@ -6,8 +6,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/mholt/caddy/caddytls"
 	"testing"
+
+	"github.com/mholt/caddy/caddytls"
 )
 
 // StorageTest is a test harness that contains tests to execute all exposed
@@ -113,7 +114,12 @@ func (s *StorageTest) TestSiteExists() error {
 	defer s.runPostTest()
 
 	// Should not exist at first
-	if s.SiteExists("example.com") {
+	siteExists, err := s.SiteExists("example.com")
+	if err != nil {
+		return err
+	}
+
+	if siteExists {
 		return errors.New("Site should not exist")
 	}
 
@@ -121,7 +127,13 @@ func (s *StorageTest) TestSiteExists() error {
 	if err := s.StoreSite("example.com", simpleSiteData); err != nil {
 		return err
 	}
-	if !s.SiteExists("example.com") {
+
+	siteExists, err = s.SiteExists("example.com")
+	if err != nil {
+		return err
+	}
+
+	if !siteExists {
 		return errors.New("Expected site to exist")
 	}
 
@@ -129,7 +141,13 @@ func (s *StorageTest) TestSiteExists() error {
 	if err := s.DeleteSite("example.com"); err != nil {
 		return err
 	}
-	if s.SiteExists("example.com") {
+
+	siteExists, err = s.SiteExists("example.com")
+	if err != nil {
+		return err
+	}
+
+	if siteExists {
 		return errors.New("Site should not exist after delete")
 	}
 	return nil
@@ -143,13 +161,15 @@ func (s *StorageTest) TestSite() error {
 	defer s.runPostTest()
 
 	// Should be a not-found error at first
-	if _, err := s.LoadSite("example.com"); err != caddytls.ErrStorageNotFound {
-		return fmt.Errorf("Expected ErrStorageNotFound from load, got: %v", err)
+	_, err := s.LoadSite("example.com")
+	if _, ok := err.(caddytls.ErrNotExist); !ok {
+		return fmt.Errorf("Expected caddytls.ErrNotExist from load, got %T: %v", err, err)
 	}
 
 	// Delete should also be a not-found error at first
-	if err := s.DeleteSite("example.com"); err != caddytls.ErrStorageNotFound {
-		return fmt.Errorf("Expected ErrStorageNotFound from delete, got: %v", err)
+	err = s.DeleteSite("example.com")
+	if _, ok := err.(caddytls.ErrNotExist); !ok {
+		return fmt.Errorf("Expected ErrNotExist from delete, got: %v", err)
 	}
 
 	// Should store successfully and then load just fine
@@ -180,8 +200,9 @@ func (s *StorageTest) TestSite() error {
 	if err := s.DeleteSite("example.com"); err != nil {
 		return err
 	}
-	if _, err := s.LoadSite("example.com"); err != caddytls.ErrStorageNotFound {
-		return fmt.Errorf("Expected ErrStorageNotFound after delete, got: %v", err)
+	_, err = s.LoadSite("example.com")
+	if _, ok := err.(caddytls.ErrNotExist); !ok {
+		return fmt.Errorf("Expected caddytls.ErrNotExist after delete, got %T: %v", err, err)
 	}
 
 	return nil
@@ -204,8 +225,9 @@ func (s *StorageTest) TestUser() error {
 	defer s.runPostTest()
 
 	// Should be a not-found error at first
-	if _, err := s.LoadUser("foo@example.com"); err != caddytls.ErrStorageNotFound {
-		return fmt.Errorf("Expected ErrStorageNotFound from load, got: %v", err)
+	_, err := s.LoadUser("foo@example.com")
+	if _, ok := err.(caddytls.ErrNotExist); !ok {
+		return fmt.Errorf("Expected caddytls.ErrNotExist from load, got %T: %v", err, err)
 	}
 
 	// Should store successfully and then load just fine

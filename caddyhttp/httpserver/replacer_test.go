@@ -1,8 +1,6 @@
 package httpserver
 
 import (
-	"bytes"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,27 +22,11 @@ func TestNewReplacer(t *testing.T) {
 
 	switch v := rep.(type) {
 	case *replacer:
-		if v.replacements["{host}"]() != "localhost" {
+		if v.getSubstitution("{host}") != "localhost" {
 			t.Error("Expected host to be localhost")
 		}
-		if v.replacements["{method}"]() != "POST" {
+		if v.getSubstitution("{method}") != "POST" {
 			t.Error("Expected request method  to be POST")
-		}
-
-		// Response placeholders should only be set after call to Replace()
-		got, want := "", ""
-		if getReplacement, ok := v.replacements["{status}"]; ok {
-			got = getReplacement()
-		}
-		if want := ""; got != want {
-			t.Errorf("Expected status to NOT be set before Replace() is called; was: %s", got)
-		}
-		rep.Replace("{foobar}")
-		if getReplacement, ok := v.replacements["{status}"]; ok {
-			got = getReplacement()
-		}
-		if want = "200"; got != want {
-			t.Errorf("Expected status to be %s, was: %s", want, got)
 		}
 	default:
 		t.Fatalf("Expected *replacer underlying Replacer type, got: %#v", rep)
@@ -63,6 +45,8 @@ func TestReplace(t *testing.T) {
 	request.Header.Set("Custom", "foobarbaz")
 	request.Header.Set("ShorterVal", "1")
 	repl := NewReplacer(request, recordRequest, "-")
+	// add some headers after creating replacer
+	request.Header.Set("CustomAdd", "caddy")
 
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -78,7 +62,8 @@ func TestReplace(t *testing.T) {
 		{"This request method is {method}.", "This request method is POST."},
 		{"The response status is {status}.", "The response status is 200."},
 		{"The Custom header is {>Custom}.", "The Custom header is foobarbaz."},
-		{"The request is {request}.", "The request is POST / HTTP/1.1\\r\\nHost: localhost\\r\\nCustom: foobarbaz\\r\\nShorterval: 1\\r\\n\\r\\n."},
+		{"The CustomAdd header is {>CustomAdd}.", "The CustomAdd header is caddy."},
+		{"The request is {request}.", "The request is POST / HTTP/1.1\\r\\nHost: localhost\\r\\nCustom: foobarbaz\\r\\nCustomadd: caddy\\r\\nShorterval: 1\\r\\n\\r\\n."},
 		{"The cUsToM header is {>cUsToM}...", "The cUsToM header is foobarbaz..."},
 		{"The Non-Existent header is {>Non-Existent}.", "The Non-Existent header is -."},
 		{"Bad {host placeholder...", "Bad {host placeholder..."},
@@ -94,19 +79,21 @@ func TestReplace(t *testing.T) {
 
 	complexCases := []struct {
 		template     string
-		replacements map[string]func() string
+		replacements map[string]string
 		expect       string
 	}{
-		{"/a{1}/{2}",
-			map[string]func() string{
-				"{1}": func() string { return "12" },
-				"{2}": func() string { return "" }},
+		{
+			"/a{1}/{2}",
+			map[string]string{
+				"{1}": "12",
+				"{2}": "",
+			},
 			"/a12/"},
 	}
 
 	for _, c := range complexCases {
 		repl := &replacer{
-			replacements: c.replacements,
+			customReplacements: c.replacements,
 		}
 		if expected, actual := c.expect, repl.Replace(c.template); expected != actual {
 			t.Errorf("for template '%s', expected '%s', got '%s'", c.template, expected, actual)
@@ -164,27 +151,20 @@ func TestRound(t *testing.T) {
 	}
 }
 
-func TestReadRequestBody(t *testing.T) {
-	payload := []byte(`{ "foo": "bar" }`)
-	var readSize int64 = 5
-	r, err := http.NewRequest("POST", "/", bytes.NewReader(payload))
-	if err != nil {
-		t.Error(err)
-	}
-	defer r.Body.Close()
-
-	logBody, err := readRequestBody(r, readSize)
-	if err != nil {
-		t.Error("readRequestBody failed", err)
-	} else if !bytes.EqualFold(payload[0:readSize], logBody) {
-		t.Error("Expected log comparison failed")
+func TestMillisecondConverstion(t *testing.T) {
+	var testCases = map[time.Duration]int64{
+		2 * time.Second:           2000,
+		9039492 * time.Nanosecond: 9,
+		1000 * time.Microsecond:   1,
+		127 * time.Nanosecond:     0,
+		0 * time.Millisecond:      0,
+		255 * time.Millisecond:    255,
 	}
 
-	// Ensure the Request body is the same as the original.
-	reqBody, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		t.Error("Unable to read request body", err)
-	} else if !bytes.EqualFold(payload, reqBody) {
-		t.Error("Expected request body comparison failed")
+	for dur, expected := range testCases {
+		numMillisecond := convertToMilliseconds(dur)
+		if numMillisecond != expected {
+			t.Errorf("Expected %v. Got %v", expected, numMillisecond)
+		}
 	}
 }
